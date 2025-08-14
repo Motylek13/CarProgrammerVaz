@@ -36,29 +36,24 @@ BASE_RES  = Path(getattr(sys, "_MEIPASS", PKG_ROOT))
 RULES_PATH = BASE_RES / "ai_assistant" / "rules.json"
 
 # ---------- тема ----------
-def setup_theme(app: QApplication):
+def setup_theme(app):
     app.setStyle("Fusion")
     pal = QPalette()
-    bg = QColor(30, 32, 36); base = QColor(25, 27, 31); alt = QColor(38, 41, 46)
-    text = QColor(232, 232, 235); dis = QColor(150, 150, 155); acc = QColor(90, 154, 255)
-    pal.setColor(QPalette.Window, bg); pal.setColor(QPalette.Base, base); pal.setColor(QPalette.AlternateBase, alt)
-    pal.setColor(QPalette.Text, text); pal.setColor(QPalette.Button, alt); pal.setColor(QPalette.ButtonText, text)
-    pal.setColor(QPalette.WindowText, text); pal.setColor(QPalette.Disabled, QPalette.Text, dis)
-    pal.setColor(QPalette.Highlight, acc); pal.setColor(QPalette.HighlightedText, QColor(0, 0, 0))
+    # ... твои цвета ...
+    pal.setColor(QPalette.Highlight, QColor(77, 163, 255))     # синий поприятнее
+    pal.setColor(QPalette.HighlightedText, QColor(255, 255, 255))  # БЕЛЫЙ текст на выделении
     app.setPalette(pal)
+
     app.setStyleSheet("""
         QWidget{font-size:13px;}
-        QGroupBox{border:1px solid #3f434a;border-radius:10px;margin-top:16px;padding:10px;}
-        QGroupBox::title{left:12px;color:#9aa3ad;}
-        QPushButton{border:1px solid #4b5160;border-radius:10px;padding:10px 16px;background:#2f333a;}
-        QPushButton:hover{background:#3a3f48;}
-        QLineEdit,QComboBox,QSpinBox{border:1px solid #4b5160;border-radius:8px;padding:6px 8px;background:#23262b;}
-        QTextEdit{border:1px solid #3f434a;border-radius:10px;background:#1e2024;}
-        QTableView{gridline-color:#3f434a;border:1px solid #3f434a;border-radius:10px;}
-        QHeaderView::section{background:#2b2f36;border:none;padding:6px;font-weight:600;}
-        QToolBar{background:#262a30;border-bottom:1px solid #3f434a;padding:4px;}
-        QStatusBar{background:#262a30;border-top:1px solid #3f434a;}
+        /* ... остальное оставь ... */
+        /* Контраст для выбранных элементов в таблице */
+        QTableView::item:selected { background: #4DA3FF; color: #ffffff; }
+        QTableView { selection-background-color:#4DA3FF; selection-color:#ffffff; }
+        /* Редактор в ячейке (чтобы текст не исчезал) */
+        QTableView QLineEdit { background: #1E2024; color: #ffffff; selection-background-color:#4DA3FF; selection-color:#ffffff; }
     """)
+
 
 def hline():
     line = QFrame(); line.setFrameShape(QFrame.HLine); line.setFrameShadow(QFrame.Sunken); return line
@@ -167,6 +162,36 @@ class MainWindow(QMainWindow):
         self.table.setSelectionBehavior(QTableView.SelectionBehavior.SelectItems)
         root.addWidget(self.table, 1)
 
+        # шрифт покрупнее и моноширинный
+        fixed = QFontDatabase.systemFont(QFontDatabase.FixedFont)
+        fixed.setPointSize(13)  # было 12 — можно 13–14
+        self.table.setFont(fixed)
+        self.table.verticalHeader().setDefaultSectionSize(24)  # выше строки
+        self.table.horizontalHeader().setDefaultAlignment(Qt.AlignCenter)
+
+        # аккуратные границы и полоски
+        self.table.setAlternatingRowColors(True)
+        self.table.setShowGrid(True)
+        self.table.setCornerButtonEnabled(False)
+
+        btn_zoom_in = QPushButton("Зум +")
+        btn_zoom_out = QPushButton("Зум –")
+        controls.addWidget(btn_zoom_in)
+        controls.addWidget(btn_zoom_out)
+
+        def _zoom(delta):
+            f = self.table.font()
+            f.setPointSize(max(8, min(24, f.pointSize() + delta)))
+            self.table.setFont(f)
+            self.table.verticalHeader().setDefaultSectionSize(int(1.85 * f.pointSize()))
+
+        btn_zoom_in.clicked.connect(lambda: _zoom(+1))
+        btn_zoom_out.clicked.connect(lambda: _zoom(-1))
+
+        self.chk_only_changed = QCheckBox("Только изменённые")
+        controls.addWidget(self.chk_only_changed)
+        self.chk_only_changed.stateChanged.connect(self._hex_filter_changed)
+
         btn_open.clicked.connect(self._hex_open)
         btn_save.clicked.connect(self._hex_save_as)
         btn_find.clicked.connect(self._hex_find)
@@ -175,6 +200,21 @@ class MainWindow(QMainWindow):
 
         self.page_hex = w
         self.tabs.addTab(w, "Hex-редактор")
+
+    def _hex_filter_changed(self, state):
+        if not self.model.edited:
+            return
+        # прыжок к первой изменённой
+        r, c = next(iter(self.model.edited))
+        idx = self.model.index(r, c)
+        self.table.setCurrentIndex(idx)
+        self.table.scrollTo(idx, QTableView.ScrollHint.PositionAtCenter)
+        self.table.resizeColumnsToContents()
+        self.model.dataChanged.connect(lambda *_: self._update_crc())
+
+        # и потом чуть добавить
+        for col in range(self.model.columnCount()):
+            self.table.setColumnWidth(col, self.table.columnWidth(col) + 10)
 
     # ---------- utils ----------
     def _log(self, html: str):

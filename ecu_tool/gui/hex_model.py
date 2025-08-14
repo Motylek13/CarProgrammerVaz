@@ -3,6 +3,8 @@ from __future__ import annotations
 from PySide6.QtCore import QAbstractTableModel, Qt, QModelIndex
 from typing import List, Tuple
 
+from PySide6.QtGui import QColor
+
 BYTES_PER_ROW = 16
 
 class HexTableModel(QAbstractTableModel):
@@ -15,6 +17,7 @@ class HexTableModel(QAbstractTableModel):
         self._orig = bytearray(data)     # исходный образ
         self._buf  = bytearray(data)     # рабочая копия
         self._dirty = set()              # индексы изменённых байтов
+        self.edited = set()
         self._undo: List[Tuple[int, int, int]] = []   # (index, old, new)
         self._redo: List[Tuple[int, int, int]] = []
 
@@ -75,6 +78,13 @@ class HexTableModel(QAbstractTableModel):
         return row * BYTES_PER_ROW + col
 
     def data(self, index, role=Qt.DisplayRole):
+        # ... твои ветки DisplayRole/EditRole ...
+        if role == Qt.BackgroundRole:
+            if (index.row(), index.column()) in self.edited:
+                return QColor("#3a3a20")  # мягкий жёлто-оливковый фон
+        return None
+
+    def data(self, index, role=Qt.DisplayRole):
         if not index.isValid(): return None
         r, c = index.row(), index.column()
 
@@ -120,30 +130,20 @@ class HexTableModel(QAbstractTableModel):
         return Qt.ItemIsEnabled | Qt.ItemIsSelectable | Qt.ItemIsEditable
 
     def setData(self, index, value, role=Qt.EditRole):
-        if role != Qt.EditRole or not index.isValid(): return False
-        if index.column() == BYTES_PER_ROW: return False
-
-        s = str(value).strip().upper()
-        # допускаем "0x1A" или "1a"
-        if s.startswith("0X"): s = s[2:]
-        if len(s) == 1: s = "0" + s
-        if len(s) != 2: return False
-        try:
-            b = int(s, 16) & 0xFF
-        except ValueError:
+        if not index.isValid() or role != Qt.EditRole:
             return False
-
-        i = self.index_to_offset(index.row(), index.column())
-        if i >= len(self._buf): return False
-
-        old = self._buf[i]
-        if old == b: return True
-
-        self._apply_set(i, b, push_history=True, changed_index=index)
-        # обновим ASCII ячейку строки
-        ascii_idx = self.index(index.row(), BYTES_PER_ROW)
-        self.dataChanged.emit(ascii_idx, ascii_idx, [Qt.DisplayRole])
-        return True
+        try:
+            b = int(value, 16)  # ожидаем 'AF'
+        except Exception:
+            return False
+        pos = index.row() * BYTES_PER_ROW + index.column()
+        if 0 <= b <= 0xFF and pos < len(self._buf):
+            if self._buf[pos] != b:
+                self._buf[pos] = b
+                self.edited.add((index.row(), index.column()))
+                self.dataChanged.emit(index, index, [Qt.DisplayRole, Qt.BackgroundRole])
+            return True
+        return False
 
     # ---------- внутреннее ----------
     def _apply_set(self, i: int, value: int, push_history: bool, changed_index=None):

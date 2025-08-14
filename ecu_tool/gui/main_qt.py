@@ -1,0 +1,349 @@
+# gui/main_qt.py
+from __future__ import annotations
+import json, zlib, sys
+from pathlib import Path
+
+from PySide6.QtWidgets import (
+    QApplication, QMainWindow, QWidget, QTabWidget, QVBoxLayout, QHBoxLayout,
+    QPushButton, QLabel, QFileDialog, QComboBox, QCheckBox, QMessageBox,
+    QSpinBox, QLineEdit, QToolBar, QStatusBar, QGroupBox, QSplitter, QFrame,
+    QTextEdit, QTableView, QProgressDialog
+)
+from PySide6.QtCore import Qt, QModelIndex
+from PySide6.QtGui import QAction, QFontDatabase, QPalette, QColor
+
+# ---- Пакетные импорты (работают и в .exe, и из исходников)
+try:
+    from ..config import LOG_FILE
+    from ..diag.dtc import parse_obd_dtc
+    from ..ai_assistant.engine import Assistant
+    from ..ecu_transport.elm327 import ELM327
+    from ..firmware.io import SimBackend, RealBackend, dump_firmware, flash_firmware
+    from ..kwp_tools import kwp_ping
+    from .hex_model import HexTableModel, BYTES_PER_ROW
+except ImportError:
+    from config import LOG_FILE
+    from diag.dtc import parse_obd_dtc
+    from ai_assistant.engine import Assistant
+    from ecu_transport.elm327 import ELM327
+    from firmware.io import SimBackend, RealBackend, dump_firmware, flash_firmware
+    from kwp_tools import kwp_ping
+    from gui.hex_model import HexTableModel, BYTES_PER_ROW
+
+# ---------- ресурсы (rules.json) ----------
+PKG_ROOT = Path(__file__).resolve().parents[1]  # .../ecu_tool
+BASE_RES  = Path(getattr(sys, "_MEIPASS", PKG_ROOT))
+RULES_PATH = BASE_RES / "ai_assistant" / "rules.json"
+
+# ---------- тема ----------
+def setup_theme(app: QApplication):
+    app.setStyle("Fusion")
+    pal = QPalette()
+    bg = QColor(30, 32, 36); base = QColor(25, 27, 31); alt = QColor(38, 41, 46)
+    text = QColor(232, 232, 235); dis = QColor(150, 150, 155); acc = QColor(90, 154, 255)
+    pal.setColor(QPalette.Window, bg); pal.setColor(QPalette.Base, base); pal.setColor(QPalette.AlternateBase, alt)
+    pal.setColor(QPalette.Text, text); pal.setColor(QPalette.Button, alt); pal.setColor(QPalette.ButtonText, text)
+    pal.setColor(QPalette.WindowText, text); pal.setColor(QPalette.Disabled, QPalette.Text, dis)
+    pal.setColor(QPalette.Highlight, acc); pal.setColor(QPalette.HighlightedText, QColor(0, 0, 0))
+    app.setPalette(pal)
+    app.setStyleSheet("""
+        QWidget{font-size:13px;}
+        QGroupBox{border:1px solid #3f434a;border-radius:10px;margin-top:16px;padding:10px;}
+        QGroupBox::title{left:12px;color:#9aa3ad;}
+        QPushButton{border:1px solid #4b5160;border-radius:10px;padding:10px 16px;background:#2f333a;}
+        QPushButton:hover{background:#3a3f48;}
+        QLineEdit,QComboBox,QSpinBox{border:1px solid #4b5160;border-radius:8px;padding:6px 8px;background:#23262b;}
+        QTextEdit{border:1px solid #3f434a;border-radius:10px;background:#1e2024;}
+        QTableView{gridline-color:#3f434a;border:1px solid #3f434a;border-radius:10px;}
+        QHeaderView::section{background:#2b2f36;border:none;padding:6px;font-weight:600;}
+        QToolBar{background:#262a30;border-bottom:1px solid #3f434a;padding:4px;}
+        QStatusBar{background:#262a30;border-top:1px solid #3f434a;}
+    """)
+
+def hline():
+    line = QFrame(); line.setFrameShape(QFrame.HLine); line.setFrameShadow(QFrame.Sunken); return line
+
+# ---------- MainWindow ----------
+class MainWindow(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("ECU Tool")
+        self.resize(1280, 800)
+
+        # toolbar
+        tb = QToolBar("Main"); tb.setMovable(False); self.addToolBar(tb)
+        act_gui = QAction("Главная", self); act_hex = QAction("Hex-редактор", self)
+        tb.addAction(act_gui); tb.addAction(act_hex)
+        act_gui.triggered.connect(lambda: self.tabs.setCurrentWidget(self.page_dash))
+        act_hex.triggered.connect(lambda: self.tabs.setCurrentWidget(self.page_hex))
+
+        self.setStatusBar(QStatusBar())
+
+        # tabs
+        self.tabs = QTabWidget(); self.setCentralWidget(self.tabs)
+        self._build_dashboard()
+        self._build_hex_editor()
+
+        # state
+        self.current_fw_path: Path | None = None
+
+    # ----------- Dashboard (кнопки + лог) -----------
+    def _build_dashboard(self):
+        w = QWidget(); root = QVBoxLayout(w)
+
+        # верх: соединение
+        grp_conn = QGroupBox("Подключение")
+        layc = QHBoxLayout(grp_conn)
+        self.cb_ports = QComboBox()
+        self.btn_refresh = QPushButton("Обновить порты")
+        self.chk_demo = QCheckBox("Демо"); self.chk_demo.setChecked(True)
+        self.sp_chunk = QSpinBox(); self.sp_chunk.setRange(64, 8192); self.sp_chunk.setValue(512)
+        layc.addWidget(QLabel("Порт:")); layc.addWidget(self.cb_ports, 1)
+        layc.addWidget(self.btn_refresh); layc.addWidget(self.chk_demo)
+        layc.addWidget(QLabel("Блок, байт:")); layc.addWidget(self.sp_chunk)
+
+        # середина: основные действия
+        grp_actions = QGroupBox("Действия")
+        laya = QHBoxLayout(grp_actions)
+        self.btn_ports = QPushButton("Порты")
+        self.btn_ping  = QPushButton("KWP-ping")
+        self.btn_dtc   = QPushButton("Считать DTC")
+        self.btn_info  = QPushButton("Инфо ЭБУ")
+        self.btn_read  = QPushButton("Считать прошивку")
+        self.btn_write = QPushButton("Записать прошивку (DEMO)")
+        self.btn_open_hex = QPushButton("Открыть в Hex…")
+        for b in (self.btn_ports, self.btn_ping, self.btn_dtc, self.btn_info, self.btn_read, self.btn_write, self.btn_open_hex):
+            laya.addWidget(b)
+
+        # низ: лог
+        grp_log = QGroupBox("Лог")
+        layl = QVBoxLayout(grp_log)
+        self.log = QTextEdit(); self.log.setReadOnly(True); layl.addWidget(self.log)
+
+        root.addWidget(grp_conn)
+        root.addWidget(grp_actions)
+        root.addWidget(grp_log, 1)
+
+        # connect
+        self.btn_refresh.clicked.connect(self._refresh_ports)
+        self.btn_ports.clicked.connect(self._show_ports)
+        self.btn_ping.clicked.connect(self._do_kwp_ping)
+        self.btn_dtc.clicked.connect(self._do_read_dtc)
+        self.btn_info.clicked.connect(self._do_ecu_info)
+        self.btn_read.clicked.connect(self._do_read_fw)
+        self.btn_write.clicked.connect(self._do_write_fw)
+        self.btn_open_hex.clicked.connect(self._open_fw_into_hex)
+
+        self._refresh_ports()
+
+        self.page_dash = w
+        self.tabs.addTab(w, "Главная")
+
+    # ----------- Hex-редактор -----------
+    def _build_hex_editor(self):
+        w = QWidget(); root = QVBoxLayout(w)
+
+        controls = QHBoxLayout()
+        btn_open = QPushButton("Открыть .bin")
+        btn_save = QPushButton("Сохранить как…")
+        self.lbl_crc = QLabel("CRC32: —")
+        self.ed_find = QLineEdit(); self.ed_find.setPlaceholderText("Поиск HEX ('DE AD BE EF') или ASCII")
+        self.chk_ascii = QCheckBox("ASCII")
+        btn_find = QPushButton("Найти")
+        self.ed_goto = QLineEdit(); self.ed_goto.setPlaceholderText("Перейти к адресу (hex)")
+        btn_goto = QPushButton("Перейти")
+        for wdg in (btn_open, btn_save, self.lbl_crc, self.ed_find, self.chk_ascii, btn_find, self.ed_goto, btn_goto):
+            controls.addWidget(wdg)
+        root.addLayout(controls)
+
+        # таблица
+        self.table = QTableView()
+        self.model = HexTableModel(b"")
+        self.table.setModel(self.model)
+        fixed = QFontDatabase.systemFont(QFontDatabase.FixedFont); fixed.setPointSize(12)
+        self.table.setFont(fixed)
+        self.table.verticalHeader().setDefaultSectionSize(22)
+        self.table.setAlternatingRowColors(True)
+        self.table.setSelectionBehavior(QTableView.SelectionBehavior.SelectItems)
+        root.addWidget(self.table, 1)
+
+        btn_open.clicked.connect(self._hex_open)
+        btn_save.clicked.connect(self._hex_save_as)
+        btn_find.clicked.connect(self._hex_find)
+        btn_goto.clicked.connect(self._hex_goto)
+        self.model.dataChanged.connect(lambda *_: self._update_crc())
+
+        self.page_hex = w
+        self.tabs.addTab(w, "Hex-редактор")
+
+    # ---------- utils ----------
+    def _log(self, html: str):
+        if hasattr(self, "log") and self.log is not None:
+            self.log.append(html)
+        self.statusBar().showMessage(self._strip(html), 3000)
+
+    @staticmethod
+    def _strip(html: str) -> str:
+        import re
+        return re.sub("<[^<]+?>", "", html)
+
+    def _backend(self):
+        return SimBackend(Path("logs/sim_ecu.bin")) if self.chk_demo.isChecked() else RealBackend(adapter="K-Line", developer_mode=False)
+
+    def _current_port(self) -> str | None:
+        return self.cb_ports.currentData() if self.cb_ports.count() else None
+
+    # ---------- actions ----------
+    def _refresh_ports(self):
+        from serial.tools import list_ports
+        self.cb_ports.clear()
+        for p in list_ports.comports():
+            self.cb_ports.addItem(f"{p.device} — {p.description}", p.device)
+        self._log("<span style='color:#9aa3ad'>Порты обновлены.</span>")
+
+    def _show_ports(self):
+        if self.cb_ports.count() == 0:
+            self._log("<b style='color:#d7ba7d'>Портов не найдено.</b>")
+        else:
+            items = [self.cb_ports.itemText(i) for i in range(self.cb_ports.count())]
+            self._log("Доступные порты:<br>• " + "<br>• ".join(items))
+
+    def _do_kwp_ping(self):
+        port = self._current_port()
+        if not port:
+            QMessageBox.warning(self, "Порт", "Выбери COM-порт."); return
+        elm = ELM327(port)
+        try:
+            self._log("<b>Инициализация адаптера…</b>")
+            elm.init()
+            ok = kwp_ping(elm, header="81 10 F1", verbose=False)
+            self._log("<span style='color:#7ed321'>ECU ответил на KWP (ping OK).</span>" if ok
+                      else "<span style='color:#d7ba7d'>Ответ на KWP не распознан.</span>")
+        except Exception as e:
+            QMessageBox.critical(self, "KWP-ping", str(e))
+        finally:
+            elm.close()
+
+    def _do_read_dtc(self):
+        assistant = Assistant(RULES_PATH)
+        if self.chk_demo.isChecked():
+            raw = "43 01 71 00 00 00\r\n>"
+            dtcs, _ = parse_obd_dtc(raw)
+        else:
+            port = self._current_port()
+            if not port:
+                QMessageBox.warning(self, "Порт", "Выбери COM-порт."); return
+            elm = ELM327(port)
+            try:
+                elm.init(); raw = elm.send_obd("03"); dtcs, _ = parse_obd_dtc(raw)
+            finally:
+                elm.close()
+        if dtcs:
+            adv = assistant.advise_for_dtcs(dtcs)
+            html = f"<b>Найдены DTC:</b> {', '.join(dtcs)}<br><br><b>Рекомендации:</b><br>" + \
+                   "<br>".join([f"{a['code'] or '-'} — {a['title']}" for a in adv])
+            self._log(html)
+        else:
+            self._log("<span style='color:#7ed321'>Коды неисправностей не обнаружены.</span>")
+
+    def _do_ecu_info(self):
+        info = self._backend().info()
+        self._log("<b>Инфо ЭБУ:</b><br><pre style='margin-top:6px'>" +
+                  json.dumps(info, ensure_ascii=False, indent=2) + "</pre>")
+
+    def _do_read_fw(self):
+        out, _ = QFileDialog.getSaveFileName(self, "Куда сохранить дамп", "logs/dump.bin", "BIN (*.bin)")
+        if not out: return
+        try:
+            prog = QProgressDialog("Чтение прошивки…", "Отмена", 0, 0, self); prog.setWindowModality(Qt.WindowModal); prog.show()
+            result = dump_firmware(self._backend(), Path(out), self.sp_chunk.value())
+            prog.close()
+            self._log(f"<b>Дамп сохранён:</b> {result['out']} ({result['bytes']} байт)")
+            # откроем в hex
+            self._load_fw_to_hex(Path(out))
+        except Exception as e:
+            QMessageBox.critical(self, "Чтение прошивки", str(e))
+
+    def _do_write_fw(self):
+        if not self.current_fw_path or not self.current_fw_path.exists():
+            QMessageBox.warning(self, "Нет файла", "Сначала открой/считай прошивку на вкладке Hex."); return
+        if not self.chk_demo.isChecked():
+            QMessageBox.critical(self, "Безопасность", "Запись на реальном ЭБУ отключена."); return
+        try:
+            prog = QProgressDialog("Запись прошивки…", "Отмена", 0, 0, self); prog.setWindowModality(Qt.WindowModal); prog.show()
+            result = flash_firmware(self._backend(), self.current_fw_path, self.sp_chunk.value())
+            prog.close()
+            self._log(f"<b>Записано:</b> {result['bytes']} байт из {result['source']}")
+        except Exception as e:
+            QMessageBox.critical(self, "Запись прошивки", str(e))
+
+    def _open_fw_into_hex(self):
+        path, _ = QFileDialog.getOpenFileName(self, "Открыть прошивку", "logs", "BIN (*.bin)")
+        if not path: return
+        self._load_fw_to_hex(Path(path))
+        self.tabs.setCurrentWidget(self.page_hex)
+
+    # ---------- hex handlers ----------
+    def _hex_open(self):
+        p, _ = QFileDialog.getOpenFileName(self, "Открыть прошивку", "logs", "BIN (*.bin)")
+        if not p: return
+        self._load_fw_to_hex(Path(p))
+
+    def _load_fw_to_hex(self, path: Path):
+        data = Path(path).read_bytes()
+        self.model.load_bytes(data)
+        self.current_fw_path = Path(path)
+        self._update_crc()
+        self._log(f"Открыт файл в Hex: <b>{path}</b>")
+
+    def _hex_save_as(self):
+        if self.model.rowCount() == 0:
+            QMessageBox.warning(self, "Нет данных", "Сначала открой или считай прошивку."); return
+        p, _ = QFileDialog.getSaveFileName(self, "Сохранить как…", "logs/patched.bin", "BIN (*.bin)")
+        if not p: return
+        Path(p).write_bytes(self.model.bytes())
+        self.current_fw_path = Path(p)
+        self._update_crc(); self._log(f"Сохранено: <b>{p}</b>")
+
+    def _hex_find(self):
+        text = self.ed_find.text().strip()
+        if not text: return
+        if self.chk_ascii.isChecked():
+            pat = text.encode("utf-8", "ignore")
+        else:
+            hexstr = text.replace(" ", "").replace("0x", "").replace("0X", "")
+            try: pat = bytes.fromhex(hexstr)
+            except ValueError:
+                QMessageBox.warning(self, "HEX", "Неверная HEX-строка."); return
+        idx = self.model.find_next(pat, start=0, ascii_mode=self.chk_ascii.isChecked())
+        if idx < 0: QMessageBox.information(self, "Поиск", "Не найдено."); return
+        self._select_offset(idx)
+
+    def _hex_goto(self):
+        s = self.ed_goto.text().strip().lower().replace("0x", "")
+        if not s: return
+        try: off = int(s, 16)
+        except ValueError: QMessageBox.warning(self, "Адрес", "Введи адрес в HEX."); return
+        self._select_offset(off)
+
+    def _select_offset(self, off: int):
+        row, col = divmod(off, BYTES_PER_ROW)
+        idx = self.model.index(row, col)
+        self.table.setCurrentIndex(idx)
+        self.table.scrollTo(idx, QTableView.ScrollHint.PositionAtCenter)
+
+    def _update_crc(self):
+        buf = self.model.bytes()
+        crc = zlib.crc32(buf) & 0xFFFFFFFF
+        self.lbl_crc.setText(f"CRC32: 0x{crc:08X} | size: {len(buf)} bytes")
+
+# ---------- entry ----------
+def main():
+    app = QApplication(sys.argv)
+    setup_theme(app)
+    win = MainWindow()
+    win.show()
+    sys.exit(app.exec())
+
+if __name__ == "__main__":
+    main()

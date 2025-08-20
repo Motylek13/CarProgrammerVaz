@@ -303,6 +303,7 @@ class MainWindow(QMainWindow):
         self.sp_rpm = QSpinBox(); self.sp_rpm.setRange(1000, 12000); self.sp_rpm.setSuffix(" об/мин")
         self.sp_rpm.setToolTip("Ограничение максимальных оборотов двигателя")
 
+
         mix_layout = QHBoxLayout(); self.mix_sliders = []; self.mix_labels = []
         for i in range(8):
             col = QVBoxLayout()
@@ -312,14 +313,13 @@ class MainWindow(QMainWindow):
             col.addWidget(lab); col.addWidget(sl)
             self.mix_sliders.append(sl); self.mix_labels.append(lab)
             mix_layout.addLayout(col)
-
+            
         self.chk_pops = QCheckBox("Отстрелы")
         self.chk_pops.setToolTip("Демонстрационный флаг активации отстрелов")
 
         lay.addWidget(QLabel("Ограничение оборотов:"))
         lay.addWidget(self.sp_rpm)
-        lay.addWidget(QLabel("Таблица смеси (0..255):"))
-        lay.addLayout(mix_layout)
+        lay.addWidget(QLabel("Таблица смеси редактируется на графике ниже"))
         lay.addWidget(self.chk_pops)
 
         btn_apply = QPushButton("Применить к Hex")
@@ -379,9 +379,11 @@ class MainWindow(QMainWindow):
         self._refresh_tune_graph()
 
     def _chart_point_moved(self, idx: int, val: int):
-        """Обновить значение спинбокса при перетаскивании точки на графике."""
-        if 0 <= idx < len(self.mix_sliders):
-            self.mix_sliders[idx].setValue(val)
+        """Обновить параметры при перетаскивании точки на графике."""
+        if 0 <= idx < len(self.tune_params.mixture):
+            self.tune_params.mixture[idx] = val
+            self._refresh_tune_graph(update_chart=False)
+
 
     def _hex_filter_changed(self, state):
         if not self.model.edited:
@@ -613,7 +615,6 @@ class MainWindow(QMainWindow):
         self.surface.axisX().setRange(0, max(0, count - 1))
         self.surface.axisZ().setRange(0, max(0, count - 1))
         self.surface.axisY().setRange(0, 255)
-
         if update_chart and hasattr(self, "mix_chart"):
             self.mix_chart.set_values(mix)
 

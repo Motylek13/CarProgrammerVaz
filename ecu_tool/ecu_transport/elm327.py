@@ -51,6 +51,17 @@ class ELM327:
         self._write(data_hex)
         return self._read_all()
 
+    # ---- KWP2000 helpers ----
+    def set_header(self, header: str) -> str:
+        """Установить KWP-заголовок (3 байта HEX)."""
+        self._write(f"AT SH {header}")
+        return self._read_all()
+
+    def send_raw(self, data_hex: str) -> str:
+        """Отправить произвольные байты (HEX) без интерпретации."""
+        self._write(data_hex)
+        return self._read_all()
+
     def close(self):
         try:
             self.ser.close()

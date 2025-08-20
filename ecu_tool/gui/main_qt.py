@@ -24,6 +24,7 @@ from PySide6.QtDataVisualization import (
     QSurfaceDataItem,
     QValue3DAxis,
     Q3DTheme,
+    main
 )
 
 # ---- Пакетные импорты (работают и в .exe, и из исходников)
@@ -281,6 +282,7 @@ class MainWindow(QMainWindow):
         self.series.setColorStyle(Q3DTheme.ColorStyleRangeGradient)
 
         self.chart_view = QWidget.createWindowContainer(self.surface)
+        main
         root.addWidget(self.chart_view, 1)
 
         btn_refresh.clicked.connect(self._update_tune_from_model)
@@ -506,6 +508,7 @@ class MainWindow(QMainWindow):
         self._log("Параметры тюнинга применены к прошивке.")
 
     def _refresh_tune_graph(self):
+
         mix = self.tune_params.mixture
         count = len(mix)
         data = []
@@ -519,6 +522,7 @@ class MainWindow(QMainWindow):
         self.surface.axisX().setRange(0, max(0, count - 1))
         self.surface.axisZ().setRange(0, max(0, count - 1))
         self.surface.axisY().setRange(0, 255)
+        main
 
     def _update_crc(self):
         buf = self.model.bytes()

@@ -102,6 +102,7 @@ def read_dtc(
 
 @app.command("ecu-info")
 def ecu_info(
+    port: str = typer.Option(None, help="COM-порт, напр. COM3"),
     demo: bool = typer.Option(False, help="Демо/симулятор вместо реального ЭБУ"),
 ):
     """
@@ -110,16 +111,24 @@ def ecu_info(
     if demo:
         backend = SimBackend(Path("logs/sim_ecu.bin"))
     else:
-        # Заглушка для реального ЭБУ
-        backend = RealBackend(adapter="K-Line", developer_mode=False)
+        if not port:
+            print("[red]Укажи COM-порт.[/]")
+            raise typer.Exit(code=2)
+        elm = ELM327(port)
+        backend = RealBackend(adapter=elm, developer_mode=False)
 
-    info = backend.info()
-    print("[bold]Информация об ЭБУ/памяти:[/]")
-    print(json.dumps(info, ensure_ascii=False, indent=2))
+    try:
+        info = backend.info()
+        print("[bold]Информация об ЭБУ/памяти:[/]")
+        print(json.dumps(info, ensure_ascii=False, indent=2))
+    finally:
+        if not demo and hasattr(backend, "close"):
+            backend.close()
 
 @app.command("read-fw")
 def read_fw(
     out_file: Path = typer.Argument(Path("logs/dump.bin"), help="Куда сохранить дамп"),
+    port: str = typer.Option(None, help="COM-порт для подключения"),
     demo: bool = typer.Option(False, help="Демо/симулятор вместо реального ЭБУ"),
     chunk: int = typer.Option(256, help="Размер блока чтения")
 ):
@@ -130,7 +139,11 @@ def read_fw(
     if demo:
         backend = SimBackend(Path("logs/sim_ecu.bin"))
     else:
-        backend = RealBackend(adapter="K-Line", developer_mode=False)
+        if not port:
+            print("[red]Укажи COM-порт.[/]")
+            raise typer.Exit(code=2)
+        elm = ELM327(port)
+        backend = RealBackend(adapter=elm, developer_mode=False)
 
     try:
         result = dump_firmware(backend, out_file, chunk)
@@ -140,10 +153,14 @@ def read_fw(
         print(f"[red]{e}[/]")
     except Exception as e:
         print(f"[red]Ошибка чтения:[/] {e}")
+    finally:
+        if not demo and hasattr(backend, "close"):
+            backend.close()
 
 @app.command("write-fw")
 def write_fw(
     in_file: Path = typer.Argument(..., help="Образ прошивки для записи"),
+    port: str = typer.Option(None, help="COM-порт для подключения"),
     demo: bool = typer.Option(False, help="Демо/симулятор вместо реального ЭБУ"),
     chunk: int = typer.Option(256, help="Размер блока записи"),
     force: bool = typer.Option(False, help="Подтверждение, что понимаешь риск записи")
@@ -159,7 +176,11 @@ def write_fw(
     if demo:
         backend = SimBackend(Path("logs/sim_ecu.bin"))
     else:
-        backend = RealBackend(adapter="K-Line", developer_mode=False)
+        if not port:
+            print("[red]Укажи COM-порт.[/]")
+            raise typer.Exit(code=2)
+        elm = ELM327(port)
+        backend = RealBackend(adapter=elm, developer_mode=False)
 
     if not demo and not force:
         print("[red]На реальном ЭБУ запись отключена по безопасности.[/]")
@@ -176,6 +197,9 @@ def write_fw(
         print(f"[red]{e}[/]")
     except Exception as e:
         print(f"[red]Ошибка записи:[/] {e}")
+    finally:
+        if not demo and hasattr(backend, "close"):
+            backend.close()
 
 # ... внизу рядом с другими командами:
 

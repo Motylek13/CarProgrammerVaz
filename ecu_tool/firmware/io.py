@@ -36,22 +36,38 @@ class RealBackend:
     Заготовка для реального K-Line/KWP2000.
     ТУТ НЕТ обхода защит и приватных seed-key: запись отключена.
     """
-    adapter: object  # сюда потом передашь твой транспорт
+    adapter: object  # транспорт (например, экземпляр ELM327)
     developer_mode: bool = False  # без этого запись запрещена
 
+    def __post_init__(self):
+        try:
+            from ..ecu_transport.kwp2000 import KWP2000
+        except ImportError:
+            from ecu_transport.kwp2000 import KWP2000
+        self.kwp = KWP2000(self.adapter)
+        try:
+            self.adapter.init()
+            self.adapter.set_header("81 10 F1")
+            self.kwp.start_session()
+        except Exception:
+            pass
+
     def read_block(self, address: int, size: int) -> bytes:
-        # TODO: здесь будет KWP2000 ReadMemoryByAddress/ReadDataByLocalIdentifier
-        raise NotImplementedError("ReadMemory not implemented for real backend yet.")
+        return self.kwp.read_memory(address, size)
 
     def write_block(self, address: int, data: bytes) -> None:
-        # Защищаемся от случайной записи
         if not self.developer_mode:
             raise PermissionError("Запись в реальный ЭБУ выключена (безопасность). Включи developer_mode только для тестов на стенде.")
-        # TODO: здесь будет SecurityAccess + WriteMemoryByAddress + верификация
         raise NotImplementedError("WriteMemory not implemented for real backend yet.")
 
     def info(self) -> dict:
         return {"backend": "real_kwp2000", "warning": "write disabled", "adapter": str(self.adapter)}
+
+    def close(self):
+        try:
+            self.adapter.close()
+        except Exception:
+            pass
 
 # ---- Высокоуровневые операции ----
 def iter_chunks(data: bytes | None, chunk_size: int) -> Iterable[bytes]:

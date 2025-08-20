@@ -613,6 +613,7 @@ class MainWindow(QMainWindow):
         self.surface.axisX().setRange(0, max(0, count - 1))
         self.surface.axisZ().setRange(0, max(0, count - 1))
         self.surface.axisY().setRange(0, 255)
+
         if update_chart and hasattr(self, "mix_chart"):
             self.mix_chart.set_values(mix)
 

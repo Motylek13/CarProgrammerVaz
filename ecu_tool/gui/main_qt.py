@@ -10,8 +10,21 @@ from PySide6.QtWidgets import (
     QTextEdit, QTableView, QProgressDialog
 )
 from PySide6.QtCore import Qt, QModelIndex
-from PySide6.QtGui import QAction, QFontDatabase, QPalette, QColor
-from PySide6.QtCharts import QChart, QChartView, QLineSeries, QValueAxis
+from PySide6.QtGui import (
+    QAction,
+    QFontDatabase,
+    QPalette,
+    QColor,
+    QVector3D,
+    QLinearGradient,
+)
+from PySide6.QtDataVisualization import (
+    Q3DSurface,
+    QSurface3DSeries,
+    QSurfaceDataItem,
+    QValue3DAxis,
+    Q3DTheme,
+)
 
 # ---- Пакетные импорты (работают и в .exe, и из исходников)
 try:
@@ -251,14 +264,23 @@ class MainWindow(QMainWindow):
 
         root.addWidget(grp)
 
-        # График смеси
-        self.series = QLineSeries()
-        chart = QChart(); chart.addSeries(self.series); chart.legend().hide()
-        axX = QValueAxis(); axX.setTitleText("Точка")
-        axY = QValueAxis(); axY.setTitleText("Смесь")
-        chart.addAxis(axX, Qt.AlignBottom); chart.addAxis(axY, Qt.AlignLeft)
-        self.series.attachAxis(axX); self.series.attachAxis(axY)
-        self.chart_view = QChartView(chart)
+        # График смеси (3D поверхность)
+        self.surface = Q3DSurface()
+        self.series = QSurface3DSeries()
+        self.surface.addSeries(self.series)
+
+        axX = QValue3DAxis(); axX.setTitle("Точка")
+        axY = QValue3DAxis(); axY.setTitle("Смесь")
+        axZ = QValue3DAxis(); axZ.setTitle("Зона")
+        self.surface.setAxisX(axX); self.surface.setAxisY(axY); self.surface.setAxisZ(axZ)
+
+        grad = QLinearGradient()
+        grad.setColorAt(0.0, QColor(0, 0, 255))
+        grad.setColorAt(1.0, QColor(255, 0, 0))
+        self.series.setBaseGradient(grad)
+        self.series.setColorStyle(Q3DTheme.ColorStyleRangeGradient)
+
+        self.chart_view = QWidget.createWindowContainer(self.surface)
         root.addWidget(self.chart_view, 1)
 
         btn_refresh.clicked.connect(self._update_tune_from_model)
@@ -267,6 +289,7 @@ class MainWindow(QMainWindow):
         self.page_tune = w
         self.tabs.addTab(w, "Тюнинг")
         self.tune_params = blank_params()
+        self._refresh_tune_graph()
 
     def _hex_filter_changed(self, state):
         if not self.model.edited:
@@ -483,9 +506,19 @@ class MainWindow(QMainWindow):
         self._log("Параметры тюнинга применены к прошивке.")
 
     def _refresh_tune_graph(self):
-        self.series.clear()
-        for i, v in enumerate(self.tune_params.mixture):
-            self.series.append(i, v)
+        mix = self.tune_params.mixture
+        count = len(mix)
+        data = []
+        for z in range(count):
+            row = []
+            for x, v in enumerate(mix):
+                y = (v + mix[z]) / 2
+                row.append(QSurfaceDataItem(QVector3D(float(x), float(y), float(z))))
+            data.append(row)
+        self.series.dataProxy().resetArray(data)
+        self.surface.axisX().setRange(0, max(0, count - 1))
+        self.surface.axisZ().setRange(0, max(0, count - 1))
+        self.surface.axisY().setRange(0, 255)
 
     def _update_crc(self):
         buf = self.model.bytes()

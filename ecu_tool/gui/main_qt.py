@@ -10,8 +10,10 @@ from PySide6.QtWidgets import (
     QTextEdit, QTableView, QProgressDialog
 )
 from PySide6.QtCore import Qt, QModelIndex
-from PySide6.QtGui import QAction, QFontDatabase, QPalette, QColor
-from PySide6.QtCharts import QChart, QChartView, QLineSeries, QValueAxis
+from PySide6.QtGui import QAction, QFontDatabase, QPalette, QColor, QVector3D
+from PySide6.QtDataVisualization import (
+    Q3DScatter, QScatter3DSeries, QScatterDataItem, QValue3DAxis
+)
 
 # ---- Пакетные импорты (работают и в .exe, и из исходников)
 try:
@@ -251,14 +253,15 @@ class MainWindow(QMainWindow):
 
         root.addWidget(grp)
 
-        # График смеси
-        self.series = QLineSeries()
-        chart = QChart(); chart.addSeries(self.series); chart.legend().hide()
-        axX = QValueAxis(); axX.setTitleText("Точка")
-        axY = QValueAxis(); axY.setTitleText("Смесь")
-        chart.addAxis(axX, Qt.AlignBottom); chart.addAxis(axY, Qt.AlignLeft)
-        self.series.attachAxis(axX); self.series.attachAxis(axY)
-        self.chart_view = QChartView(chart)
+        # График смеси (3D)
+        self.scatter = Q3DScatter()
+        self.series = QScatter3DSeries()
+        self.scatter.addSeries(self.series)
+        axX = QValue3DAxis(); axX.setTitle("Точка")
+        axY = QValue3DAxis(); axY.setTitle("Смесь")
+        axZ = QValue3DAxis(); axZ.setTitle("Z")
+        self.scatter.setAxisX(axX); self.scatter.setAxisY(axY); self.scatter.setAxisZ(axZ)
+        self.chart_view = QWidget.createWindowContainer(self.scatter)
         root.addWidget(self.chart_view, 1)
 
         btn_refresh.clicked.connect(self._update_tune_from_model)
@@ -267,6 +270,7 @@ class MainWindow(QMainWindow):
         self.page_tune = w
         self.tabs.addTab(w, "Тюнинг")
         self.tune_params = blank_params()
+        self._refresh_tune_graph()
 
     def _hex_filter_changed(self, state):
         if not self.model.edited:
@@ -483,9 +487,12 @@ class MainWindow(QMainWindow):
         self._log("Параметры тюнинга применены к прошивке.")
 
     def _refresh_tune_graph(self):
-        self.series.clear()
-        for i, v in enumerate(self.tune_params.mixture):
-            self.series.append(i, v)
+        data = [QScatterDataItem(QVector3D(float(i), float(v), 0.0))
+                for i, v in enumerate(self.tune_params.mixture)]
+        self.series.dataProxy().resetArray(data)
+        self.scatter.axisX().setRange(0, max(0, len(self.tune_params.mixture) - 1))
+        self.scatter.axisY().setRange(0, 255)
+        self.scatter.axisZ().setRange(0, 1)
 
     def _update_crc(self):
         buf = self.model.bytes()

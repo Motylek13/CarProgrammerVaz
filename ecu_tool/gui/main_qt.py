@@ -6,7 +6,7 @@ from pathlib import Path
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QTabWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLabel, QFileDialog, QComboBox, QCheckBox, QMessageBox,
-    QSpinBox, QLineEdit, QToolBar, QStatusBar, QGroupBox, QSplitter, QFrame,
+    QSpinBox, QSlider, QLineEdit, QToolBar, QStatusBar, QGroupBox, QSplitter, QFrame,
     QTextEdit, QTableView, QProgressDialog
 )
 from PySide6.QtCore import Qt, QModelIndex, QPointF, Signal
@@ -26,7 +26,6 @@ from PySide6.QtDataVisualization import (
     QSurfaceDataItem,
     QValue3DAxis,
     Q3DTheme,
-    main
 )
 
 # ---- Пакетные импорты (работают и в .exe, и из исходников)
@@ -79,6 +78,9 @@ def setup_theme(app):
         QTableView::item:selected { background:#4DA3FF; color:#ffffff; }
         QTableView { selection-background-color:#4DA3FF; selection-color:#ffffff; }
         QTableView QLineEdit { background:#1E2024; color:#ffffff; selection-background-color:#4DA3FF; selection-color:#ffffff; }
+        QSlider::groove:vertical{background:#3c3f43; width:6px; border-radius:3px;}
+        QSlider::handle:vertical{background:#4DA3FF; border:1px solid #4DA3FF; height:14px; margin:-4px 0; border-radius:4px;}
+        QSlider::sub-page:vertical{background:#4DA3FF; border-radius:3px;}
     """)
 
 
@@ -97,8 +99,15 @@ class MixChartView(QChartView):
         chart.addSeries(self.series)
         chart.createDefaultAxes()
         chart.legend().hide()
+        chart.setBackgroundBrush(QColor(30, 32, 36))
+        chart.setPlotAreaBackgroundBrush(QColor(45, 45, 45))
+        chart.setPlotAreaBackgroundVisible(True)
         chart.axisX().setRange(0, 7)
         chart.axisY().setRange(0, 255)
+        pen = self.series.pen(); pen.setWidth(2); pen.setColor(QColor(77, 163, 255)); self.series.setPen(pen)
+        axisX = chart.axisX(); axisY = chart.axisY()
+        axisX.setLabelsBrush(QColor("#dcdcdc")); axisY.setLabelsBrush(QColor("#dcdcdc"))
+        axisX.setGridLineColor(QColor(60, 60, 60)); axisY.setGridLineColor(QColor(60, 60, 60))
         self.series.setPointsVisible(True)
         self.series.setMarkerSize(8)
         super().__init__(chart)
@@ -294,11 +303,15 @@ class MainWindow(QMainWindow):
         self.sp_rpm = QSpinBox(); self.sp_rpm.setRange(1000, 12000); self.sp_rpm.setSuffix(" об/мин")
         self.sp_rpm.setToolTip("Ограничение максимальных оборотов двигателя")
 
-        mix_layout = QHBoxLayout(); self.mix_spins = []
+        mix_layout = QHBoxLayout(); self.mix_sliders = []; self.mix_labels = []
         for i in range(8):
-            sp = QSpinBox(); sp.setRange(0, 255)
-            sp.setToolTip("Смесь для точки %d" % (i + 1))
-            self.mix_spins.append(sp); mix_layout.addWidget(sp)
+            col = QVBoxLayout()
+            lab = QLabel("0"); lab.setAlignment(Qt.AlignHCenter)
+            sl = QSlider(Qt.Vertical); sl.setRange(0, 255)
+            sl.setTickPosition(QSlider.TicksBothSides); sl.setTickInterval(32)
+            col.addWidget(lab); col.addWidget(sl)
+            self.mix_sliders.append(sl); self.mix_labels.append(lab)
+            mix_layout.addLayout(col)
 
         self.chk_pops = QCheckBox("Отстрелы")
         self.chk_pops.setToolTip("Демонстрационный флаг активации отстрелов")
@@ -331,6 +344,11 @@ class MainWindow(QMainWindow):
         axZ = QValue3DAxis(); axZ.setTitle("Зона")
         self.surface.setAxisX(axX); self.surface.setAxisY(axY); self.surface.setAxisZ(axZ)
 
+        theme = self.surface.activeTheme()
+        theme.setBackgroundEnabled(False)
+        theme.setLabelTextColor(QColor(220, 220, 220))
+        theme.setGridEnabled(True)
+
         grad = QLinearGradient()
         grad.setColorAt(0.0, QColor(0, 0, 255))
         grad.setColorAt(1.0, QColor(255, 0, 0))
@@ -341,16 +359,16 @@ class MainWindow(QMainWindow):
         split = QSplitter(Qt.Vertical)
         split.addWidget(self.mix_chart)
         split.addWidget(self.chart_view)
-        main
         root.addWidget(split, 1)
 
-        def _spin_changed(idx, val):
+        def _slider_changed(idx, val):
             self.tune_params.mixture[idx] = val
+            self.mix_labels[idx].setText(str(val))
             self.mix_chart.series.replace(idx, QPointF(idx, val))
             self._refresh_tune_graph(update_chart=False)
 
-        for i, sp in enumerate(self.mix_spins):
-            sp.valueChanged.connect(lambda val, i=i: _spin_changed(i, val))
+        for i, sl in enumerate(self.mix_sliders):
+            sl.valueChanged.connect(lambda val, i=i: _slider_changed(i, val))
 
         btn_refresh.clicked.connect(self._update_tune_from_model)
         btn_apply.clicked.connect(self._apply_tune_changes)
@@ -362,8 +380,8 @@ class MainWindow(QMainWindow):
 
     def _chart_point_moved(self, idx: int, val: int):
         """Обновить значение спинбокса при перетаскивании точки на графике."""
-        if 0 <= idx < len(self.mix_spins):
-            self.mix_spins[idx].setValue(val)
+        if 0 <= idx < len(self.mix_sliders):
+            self.mix_sliders[idx].setValue(val)
 
     def _hex_filter_changed(self, state):
         if not self.model.edited:
@@ -563,14 +581,15 @@ class MainWindow(QMainWindow):
             data = self.model.bytes()
             self.tune_params = read_params(data)
         self.sp_rpm.setValue(self.tune_params.rpm_limit)
-        for sp, val in zip(self.mix_spins, self.tune_params.mixture):
-            sp.setValue(val)
+        for sl, lab, val in zip(self.mix_sliders, self.mix_labels, self.tune_params.mixture):
+            sl.setValue(val)
+            lab.setText(str(val))
         self.chk_pops.setChecked(bool(self.tune_params.pops))
         self._refresh_tune_graph()
 
     def _apply_tune_changes(self):
         self.tune_params.rpm_limit = self.sp_rpm.value()
-        self.tune_params.mixture = [sp.value() for sp in self.mix_spins]
+        self.tune_params.mixture = [sl.value() for sl in self.mix_sliders]
         self.tune_params.pops = 1 if self.chk_pops.isChecked() else 0
         buf = bytearray(self.model.bytes())
         write_params(buf, self.tune_params)
@@ -596,7 +615,6 @@ class MainWindow(QMainWindow):
         self.surface.axisY().setRange(0, 255)
         if update_chart and hasattr(self, "mix_chart"):
             self.mix_chart.set_values(mix)
-        main
 
     def _update_crc(self):
         buf = self.model.bytes()

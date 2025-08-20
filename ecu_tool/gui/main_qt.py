@@ -39,19 +39,27 @@ RULES_PATH = BASE_RES / "ai_assistant" / "rules.json"
 def setup_theme(app):
     app.setStyle("Fusion")
     pal = QPalette()
-    # ... твои цвета ...
-    pal.setColor(QPalette.Highlight, QColor(77, 163, 255))     # синий поприятнее
-    pal.setColor(QPalette.HighlightedText, QColor(255, 255, 255))  # БЕЛЫЙ текст на выделении
+    pal.setColor(QPalette.Window, QColor(30, 32, 36))
+    pal.setColor(QPalette.WindowText, QColor(220, 220, 220))
+    pal.setColor(QPalette.Base, QColor(30, 30, 30))
+    pal.setColor(QPalette.AlternateBase, QColor(45, 45, 45))
+    pal.setColor(QPalette.Text, QColor(220, 220, 220))
+    pal.setColor(QPalette.Button, QColor(45, 45, 45))
+    pal.setColor(QPalette.ButtonText, QColor(220, 220, 220))
+    pal.setColor(QPalette.Highlight, QColor(77, 163, 255))
+    pal.setColor(QPalette.HighlightedText, QColor(255, 255, 255))
     app.setPalette(pal)
 
     app.setStyleSheet("""
-        QWidget{font-size:13px;}
-        /* ... остальное оставь ... */
-        /* Контраст для выбранных элементов в таблице */
-        QTableView::item:selected { background: #4DA3FF; color: #ffffff; }
+        QWidget{font-size:13px; color:#dcdcdc;}
+        QGroupBox{margin-top:1ex;}
+        QGroupBox::title{color:#9aa3ad;}
+        QPushButton{background-color:#2d2f33; color:#ffffff; border:1px solid #3c3f43; border-radius:4px; padding:4px;}
+        QPushButton:hover{background-color:#3c3f43;}
+        QTextEdit,QLineEdit{background:#1e2024; color:#ffffff;}
+        QTableView::item:selected { background:#4DA3FF; color:#ffffff; }
         QTableView { selection-background-color:#4DA3FF; selection-color:#ffffff; }
-        /* Редактор в ячейке (чтобы текст не исчезал) */
-        QTableView QLineEdit { background: #1E2024; color: #ffffff; selection-background-color:#4DA3FF; selection-color:#ffffff; }
+        QTableView QLineEdit { background:#1E2024; color:#ffffff; selection-background-color:#4DA3FF; selection-color:#ffffff; }
     """)
 
 
@@ -228,7 +236,13 @@ class MainWindow(QMainWindow):
         return re.sub("<[^<]+?>", "", html)
 
     def _backend(self):
-        return SimBackend(Path("logs/sim_ecu.bin")) if self.chk_demo.isChecked() else RealBackend(adapter="K-Line", developer_mode=False)
+        if self.chk_demo.isChecked():
+            return SimBackend(Path("logs/sim_ecu.bin"))
+        port = self._current_port()
+        if not port:
+            raise RuntimeError("COM-порт не выбран")
+        elm = ELM327(port)
+        return RealBackend(adapter=elm, developer_mode=False)
 
     def _current_port(self) -> str | None:
         return self.cb_ports.currentData() if self.cb_ports.count() else None
@@ -287,35 +301,47 @@ class MainWindow(QMainWindow):
             self._log("<span style='color:#7ed321'>Коды неисправностей не обнаружены.</span>")
 
     def _do_ecu_info(self):
-        info = self._backend().info()
-        self._log("<b>Инфо ЭБУ:</b><br><pre style='margin-top:6px'>" +
-                  json.dumps(info, ensure_ascii=False, indent=2) + "</pre>")
+        backend = self._backend()
+        try:
+            info = backend.info()
+            self._log("<b>Инфо ЭБУ:</b><br><pre style='margin-top:6px'>" +
+                      json.dumps(info, ensure_ascii=False, indent=2) + "</pre>")
+        finally:
+            if hasattr(backend, "close"):
+                backend.close()
 
     def _do_read_fw(self):
         out, _ = QFileDialog.getSaveFileName(self, "Куда сохранить дамп", "logs/dump.bin", "BIN (*.bin)")
         if not out: return
+        backend = self._backend()
         try:
             prog = QProgressDialog("Чтение прошивки…", "Отмена", 0, 0, self); prog.setWindowModality(Qt.WindowModal); prog.show()
-            result = dump_firmware(self._backend(), Path(out), self.sp_chunk.value())
+            result = dump_firmware(backend, Path(out), self.sp_chunk.value())
             prog.close()
             self._log(f"<b>Дамп сохранён:</b> {result['out']} ({result['bytes']} байт)")
-            # откроем в hex
             self._load_fw_to_hex(Path(out))
         except Exception as e:
             QMessageBox.critical(self, "Чтение прошивки", str(e))
+        finally:
+            if hasattr(backend, "close"):
+                backend.close()
 
     def _do_write_fw(self):
         if not self.current_fw_path or not self.current_fw_path.exists():
             QMessageBox.warning(self, "Нет файла", "Сначала открой/считай прошивку на вкладке Hex."); return
         if not self.chk_demo.isChecked():
             QMessageBox.critical(self, "Безопасность", "Запись на реальном ЭБУ отключена."); return
+        backend = self._backend()
         try:
             prog = QProgressDialog("Запись прошивки…", "Отмена", 0, 0, self); prog.setWindowModality(Qt.WindowModal); prog.show()
-            result = flash_firmware(self._backend(), self.current_fw_path, self.sp_chunk.value())
+            result = flash_firmware(backend, self.current_fw_path, self.sp_chunk.value())
             prog.close()
             self._log(f"<b>Записано:</b> {result['bytes']} байт из {result['source']}")
         except Exception as e:
             QMessageBox.critical(self, "Запись прошивки", str(e))
+        finally:
+            if hasattr(backend, "close"):
+                backend.close()
 
     def _open_fw_into_hex(self):
         path, _ = QFileDialog.getOpenFileName(self, "Открыть прошивку", "logs", "BIN (*.bin)")

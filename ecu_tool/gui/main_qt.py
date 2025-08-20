@@ -9,7 +9,7 @@ from PySide6.QtWidgets import (
     QSpinBox, QLineEdit, QToolBar, QStatusBar, QGroupBox, QSplitter, QFrame,
     QTextEdit, QTableView, QProgressDialog
 )
-from PySide6.QtCore import Qt, QModelIndex
+from PySide6.QtCore import Qt, QModelIndex, QPointF, Signal
 from PySide6.QtGui import (
     QAction,
     QFontDatabase,
@@ -17,7 +17,9 @@ from PySide6.QtGui import (
     QColor,
     QVector3D,
     QLinearGradient,
+    QPainter,
 )
+from PySide6.QtCharts import QChart, QChartView, QLineSeries
 from PySide6.QtDataVisualization import (
     Q3DSurface,
     QSurface3DSeries,
@@ -82,6 +84,57 @@ def setup_theme(app):
 
 def hline():
     line = QFrame(); line.setFrameShape(QFrame.HLine); line.setFrameShadow(QFrame.Sunken); return line
+
+
+class MixChartView(QChartView):
+    """Простой график смеси с возможностью перетаскивания точек."""
+
+    point_moved = Signal(int, int)  # index, value
+
+    def __init__(self, parent=None):
+        self.series = QLineSeries()
+        chart = QChart()
+        chart.addSeries(self.series)
+        chart.createDefaultAxes()
+        chart.legend().hide()
+        chart.axisX().setRange(0, 7)
+        chart.axisY().setRange(0, 255)
+        self.series.setPointsVisible(True)
+        self.series.setMarkerSize(8)
+        super().__init__(chart)
+        self.setRenderHint(QPainter.Antialiasing)
+        self.setMouseTracking(True)
+        self._drag_index: int | None = None
+
+    def set_values(self, values):
+        self.series.clear()
+        for i, v in enumerate(values):
+            self.series.append(float(i), float(v))
+        self.chart().axisX().setRange(0, max(0, len(values) - 1))
+
+    def mousePressEvent(self, event):
+        pos = event.position()
+        chart = self.chart()
+        for i, pt in enumerate(self.series.pointsVector()):
+            sp = chart.mapToPosition(pt, self.series)
+            if abs(sp.x() - pos.x()) < 8 and abs(sp.y() - pos.y()) < 8:
+                self._drag_index = i
+                break
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self._drag_index is not None:
+            chart = self.chart()
+            val = chart.mapToValue(event.position(), self.series)
+            y = max(0.0, min(255.0, val.y()))
+            x = self.series.pointsVector()[self._drag_index].x()
+            self.series.replace(self._drag_index, QPointF(x, y))
+            self.point_moved.emit(int(x), int(y))
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        self._drag_index = None
+        super().mouseReleaseEvent(event)
 
 # ---------- MainWindow ----------
 class MainWindow(QMainWindow):
@@ -265,7 +318,10 @@ class MainWindow(QMainWindow):
 
         root.addWidget(grp)
 
-        # График смеси (3D поверхность)
+        # Графики смеси: 2D редактируемый и 3D поверхность
+        self.mix_chart = MixChartView()
+        self.mix_chart.point_moved.connect(self._chart_point_moved)
+
         self.surface = Q3DSurface()
         self.series = QSurface3DSeries()
         self.surface.addSeries(self.series)
@@ -282,8 +338,19 @@ class MainWindow(QMainWindow):
         self.series.setColorStyle(Q3DTheme.ColorStyleRangeGradient)
 
         self.chart_view = QWidget.createWindowContainer(self.surface)
+        split = QSplitter(Qt.Vertical)
+        split.addWidget(self.mix_chart)
+        split.addWidget(self.chart_view)
         main
-        root.addWidget(self.chart_view, 1)
+        root.addWidget(split, 1)
+
+        def _spin_changed(idx, val):
+            self.tune_params.mixture[idx] = val
+            self.mix_chart.series.replace(idx, QPointF(idx, val))
+            self._refresh_tune_graph(update_chart=False)
+
+        for i, sp in enumerate(self.mix_spins):
+            sp.valueChanged.connect(lambda val, i=i: _spin_changed(i, val))
 
         btn_refresh.clicked.connect(self._update_tune_from_model)
         btn_apply.clicked.connect(self._apply_tune_changes)
@@ -292,6 +359,11 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(w, "Тюнинг")
         self.tune_params = blank_params()
         self._refresh_tune_graph()
+
+    def _chart_point_moved(self, idx: int, val: int):
+        """Обновить значение спинбокса при перетаскивании точки на графике."""
+        if 0 <= idx < len(self.mix_spins):
+            self.mix_spins[idx].setValue(val)
 
     def _hex_filter_changed(self, state):
         if not self.model.edited:
@@ -507,7 +579,7 @@ class MainWindow(QMainWindow):
         self._refresh_tune_graph()
         self._log("Параметры тюнинга применены к прошивке.")
 
-    def _refresh_tune_graph(self):
+    def _refresh_tune_graph(self, update_chart: bool = True):
 
         mix = self.tune_params.mixture
         count = len(mix)
@@ -522,6 +594,8 @@ class MainWindow(QMainWindow):
         self.surface.axisX().setRange(0, max(0, count - 1))
         self.surface.axisZ().setRange(0, max(0, count - 1))
         self.surface.axisY().setRange(0, 255)
+        if update_chart and hasattr(self, "mix_chart"):
+            self.mix_chart.set_values(mix)
         main
 
     def _update_crc(self):

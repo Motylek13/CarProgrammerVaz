@@ -6,7 +6,7 @@ from pathlib import Path
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QTabWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLabel, QFileDialog, QComboBox, QCheckBox, QMessageBox,
-    QSpinBox, QLineEdit, QToolBar, QStatusBar, QGroupBox, QSplitter, QFrame,
+    QSpinBox, QSlider, QLineEdit, QToolBar, QStatusBar, QGroupBox, QSplitter, QFrame,
     QTextEdit, QTableView, QProgressDialog
 )
 from PySide6.QtCore import Qt, QModelIndex, QPointF, Signal
@@ -78,6 +78,9 @@ def setup_theme(app):
         QTableView::item:selected { background:#4DA3FF; color:#ffffff; }
         QTableView { selection-background-color:#4DA3FF; selection-color:#ffffff; }
         QTableView QLineEdit { background:#1E2024; color:#ffffff; selection-background-color:#4DA3FF; selection-color:#ffffff; }
+        QSlider::groove:vertical{background:#3c3f43; width:6px; border-radius:3px;}
+        QSlider::handle:vertical{background:#4DA3FF; border:1px solid #4DA3FF; height:14px; margin:-4px 0; border-radius:4px;}
+        QSlider::sub-page:vertical{background:#4DA3FF; border-radius:3px;}
     """)
 
 
@@ -300,6 +303,17 @@ class MainWindow(QMainWindow):
         self.sp_rpm = QSpinBox(); self.sp_rpm.setRange(1000, 12000); self.sp_rpm.setSuffix(" об/мин")
         self.sp_rpm.setToolTip("Ограничение максимальных оборотов двигателя")
 
+
+        mix_layout = QHBoxLayout(); self.mix_sliders = []; self.mix_labels = []
+        for i in range(8):
+            col = QVBoxLayout()
+            lab = QLabel("0"); lab.setAlignment(Qt.AlignHCenter)
+            sl = QSlider(Qt.Vertical); sl.setRange(0, 255)
+            sl.setTickPosition(QSlider.TicksBothSides); sl.setTickInterval(32)
+            col.addWidget(lab); col.addWidget(sl)
+            self.mix_sliders.append(sl); self.mix_labels.append(lab)
+            mix_layout.addLayout(col)
+            
         self.chk_pops = QCheckBox("Отстрелы")
         self.chk_pops.setToolTip("Демонстрационный флаг активации отстрелов")
 
@@ -347,6 +361,15 @@ class MainWindow(QMainWindow):
         split.addWidget(self.chart_view)
         root.addWidget(split, 1)
 
+        def _slider_changed(idx, val):
+            self.tune_params.mixture[idx] = val
+            self.mix_labels[idx].setText(str(val))
+            self.mix_chart.series.replace(idx, QPointF(idx, val))
+            self._refresh_tune_graph(update_chart=False)
+
+        for i, sl in enumerate(self.mix_sliders):
+            sl.valueChanged.connect(lambda val, i=i: _slider_changed(i, val))
+
         btn_refresh.clicked.connect(self._update_tune_from_model)
         btn_apply.clicked.connect(self._apply_tune_changes)
 
@@ -360,6 +383,7 @@ class MainWindow(QMainWindow):
         if 0 <= idx < len(self.tune_params.mixture):
             self.tune_params.mixture[idx] = val
             self._refresh_tune_graph(update_chart=False)
+
 
     def _hex_filter_changed(self, state):
         if not self.model.edited:
@@ -559,11 +583,15 @@ class MainWindow(QMainWindow):
             data = self.model.bytes()
             self.tune_params = read_params(data)
         self.sp_rpm.setValue(self.tune_params.rpm_limit)
+        for sl, lab, val in zip(self.mix_sliders, self.mix_labels, self.tune_params.mixture):
+            sl.setValue(val)
+            lab.setText(str(val))
         self.chk_pops.setChecked(bool(self.tune_params.pops))
         self._refresh_tune_graph()
 
     def _apply_tune_changes(self):
         self.tune_params.rpm_limit = self.sp_rpm.value()
+        self.tune_params.mixture = [sl.value() for sl in self.mix_sliders]
         self.tune_params.pops = 1 if self.chk_pops.isChecked() else 0
         buf = bytearray(self.model.bytes())
         write_params(buf, self.tune_params)

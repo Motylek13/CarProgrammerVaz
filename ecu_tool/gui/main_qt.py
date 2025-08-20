@@ -11,6 +11,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Qt, QModelIndex
 from PySide6.QtGui import QAction, QFontDatabase, QPalette, QColor
+from PySide6.QtCharts import QChart, QChartView, QLineSeries, QValueAxis
 
 # ---- Пакетные импорты (работают и в .exe, и из исходников)
 try:
@@ -19,6 +20,7 @@ try:
     from ..ai_assistant.engine import Assistant
     from ..ecu_transport.elm327 import ELM327
     from ..firmware.io import SimBackend, RealBackend, dump_firmware, flash_firmware
+    from ..firmware.tune import read_params, write_params, TuneParams, blank_params
     from ..kwp_tools import kwp_ping
     from .hex_model import HexTableModel, BYTES_PER_ROW
 except ImportError:
@@ -27,6 +29,7 @@ except ImportError:
     from ai_assistant.engine import Assistant
     from ecu_transport.elm327 import ELM327
     from firmware.io import SimBackend, RealBackend, dump_firmware, flash_firmware
+    from firmware.tune import read_params, write_params, TuneParams, blank_params
     from kwp_tools import kwp_ping
     from gui.hex_model import HexTableModel, BYTES_PER_ROW
 
@@ -75,10 +78,13 @@ class MainWindow(QMainWindow):
 
         # toolbar
         tb = QToolBar("Main"); tb.setMovable(False); self.addToolBar(tb)
-        act_gui = QAction("Главная", self); act_hex = QAction("Hex-редактор", self)
-        tb.addAction(act_gui); tb.addAction(act_hex)
+        act_gui = QAction("Главная", self)
+        act_hex = QAction("Hex-редактор", self)
+        act_tune = QAction("Тюнинг", self)
+        tb.addAction(act_gui); tb.addAction(act_hex); tb.addAction(act_tune)
         act_gui.triggered.connect(lambda: self.tabs.setCurrentWidget(self.page_dash))
         act_hex.triggered.connect(lambda: self.tabs.setCurrentWidget(self.page_hex))
+        act_tune.triggered.connect(lambda: self.tabs.setCurrentWidget(self.page_tune))
 
         self.setStatusBar(QStatusBar())
 
@@ -86,6 +92,7 @@ class MainWindow(QMainWindow):
         self.tabs = QTabWidget(); self.setCentralWidget(self.tabs)
         self._build_dashboard()
         self._build_hex_editor()
+        self._build_tune_tab()
 
         # state
         self.current_fw_path: Path | None = None
@@ -208,6 +215,58 @@ class MainWindow(QMainWindow):
 
         self.page_hex = w
         self.tabs.addTab(w, "Hex-редактор")
+
+    # ----------- Tuning tab -----------
+    def _build_tune_tab(self):
+        w = QWidget(); root = QVBoxLayout(w)
+
+        # Параметры
+        grp = QGroupBox("Настройки")
+        lay = QVBoxLayout(grp)
+
+        self.sp_rpm = QSpinBox(); self.sp_rpm.setRange(1000, 12000); self.sp_rpm.setSuffix(" об/мин")
+        self.sp_rpm.setToolTip("Ограничение максимальных оборотов двигателя")
+
+        mix_layout = QHBoxLayout(); self.mix_spins = []
+        for i in range(8):
+            sp = QSpinBox(); sp.setRange(0, 255)
+            sp.setToolTip("Смесь для точки %d" % (i + 1))
+            self.mix_spins.append(sp); mix_layout.addWidget(sp)
+
+        self.chk_pops = QCheckBox("Отстрелы")
+        self.chk_pops.setToolTip("Демонстрационный флаг активации отстрелов")
+
+        lay.addWidget(QLabel("Ограничение оборотов:"))
+        lay.addWidget(self.sp_rpm)
+        lay.addWidget(QLabel("Таблица смеси (0..255):"))
+        lay.addLayout(mix_layout)
+        lay.addWidget(self.chk_pops)
+
+        btn_apply = QPushButton("Применить к Hex")
+        btn_apply.setToolTip("Записать параметры в текущую прошивку")
+        btn_refresh = QPushButton("Обновить из Hex")
+        btn_refresh.setToolTip("Перечитать параметры из образа")
+        btns = QHBoxLayout(); btns.addWidget(btn_refresh); btns.addWidget(btn_apply)
+        lay.addLayout(btns)
+
+        root.addWidget(grp)
+
+        # График смеси
+        self.series = QLineSeries()
+        chart = QChart(); chart.addSeries(self.series); chart.legend().hide()
+        axX = QValueAxis(); axX.setTitleText("Точка")
+        axY = QValueAxis(); axY.setTitleText("Смесь")
+        chart.addAxis(axX, Qt.AlignBottom); chart.addAxis(axY, Qt.AlignLeft)
+        self.series.attachAxis(axX); self.series.attachAxis(axY)
+        self.chart_view = QChartView(chart)
+        root.addWidget(self.chart_view, 1)
+
+        btn_refresh.clicked.connect(self._update_tune_from_model)
+        btn_apply.clicked.connect(self._apply_tune_changes)
+
+        self.page_tune = w
+        self.tabs.addTab(w, "Тюнинг")
+        self.tune_params = blank_params()
 
     def _hex_filter_changed(self, state):
         if not self.model.edited:
@@ -361,6 +420,7 @@ class MainWindow(QMainWindow):
         self.current_fw_path = Path(path)
         self._update_crc()
         self._log(f"Открыт файл в Hex: <b>{path}</b>")
+        self._update_tune_from_model()
 
     def _hex_save_as(self):
         if self.model.rowCount() == 0:
@@ -397,6 +457,35 @@ class MainWindow(QMainWindow):
         idx = self.model.index(row, col)
         self.table.setCurrentIndex(idx)
         self.table.scrollTo(idx, QTableView.ScrollHint.PositionAtCenter)
+
+    # ---------- tuning helpers ----------
+    def _update_tune_from_model(self):
+        if self.model.rowCount() == 0:
+            self.tune_params = blank_params()
+        else:
+            data = self.model.bytes()
+            self.tune_params = read_params(data)
+        self.sp_rpm.setValue(self.tune_params.rpm_limit)
+        for sp, val in zip(self.mix_spins, self.tune_params.mixture):
+            sp.setValue(val)
+        self.chk_pops.setChecked(bool(self.tune_params.pops))
+        self._refresh_tune_graph()
+
+    def _apply_tune_changes(self):
+        self.tune_params.rpm_limit = self.sp_rpm.value()
+        self.tune_params.mixture = [sp.value() for sp in self.mix_spins]
+        self.tune_params.pops = 1 if self.chk_pops.isChecked() else 0
+        buf = bytearray(self.model.bytes())
+        write_params(buf, self.tune_params)
+        self.model.load_bytes(bytes(buf))
+        self._update_crc()
+        self._refresh_tune_graph()
+        self._log("Параметры тюнинга применены к прошивке.")
+
+    def _refresh_tune_graph(self):
+        self.series.clear()
+        for i, v in enumerate(self.tune_params.mixture):
+            self.series.append(i, v)
 
     def _update_crc(self):
         buf = self.model.bytes()
